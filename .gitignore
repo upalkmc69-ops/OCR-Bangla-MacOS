@@ -1,0 +1,11 @@
+# Python Virtual Environment
+venv/
+__pycache__/
+*.pyc
+# PyInstaller Build Outputs
+build/
+dist/
+*.spec
+
+# macOS System Files
+.DS_Store
