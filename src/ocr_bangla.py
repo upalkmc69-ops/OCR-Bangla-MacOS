@@ -10,7 +10,6 @@ from tkinter import filedialog, messagebox, ttk
 # Import python-docx features for absolute canvas rendering
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
@@ -26,25 +25,24 @@ def get_tessdata_path():
 
 def create_floating_textbox(doc, text, left_inch, top_inch, width_inch, height_inch):
     """
-    Injects an advanced, absolute-positioned, borderless floating Text Box shape
-    directly into the document's XML structure to map OCR coordinates perfectly.
+    Injects an absolute-positioned, borderless floating Text Box shape
+    directly into the document's XML structure to map OCR coordinates.
     """
     paragraph = doc.add_paragraph()
     run = paragraph.add_run()
     
-    # 1. Open XML Namespace definitions for drawings and shapes
+    # XML Namespace definitions for drawings and shapes
     ns_wps = "http://microsoft.com"
-    ns_wpc = "http://microsoft.com"
     ns_v = "urn:schemas-microsoft-com:vml"
     ns_o = "urn:schemas-microsoft-com:office:office"
     
-    # Convert inches to structural EMUs (English Metric Units: 1 inch = 914400 EMUs)
+    # Convert inches to structural EMUs (1 inch = 914400 EMUs)
     emu_left = int(left_inch * 914400)
     emu_top = int(top_inch * 914400)
     emu_width = int(width_inch * 914400)
     emu_height = int(height_inch * 914400)
 
-    # 2. Build the low-level OpenXML node structure for a modern floating shape container
+    # Build the low-level OpenXML node structure for a modern floating shape container
     drawing = OxmlElement('w:drawing')
     anchor = OxmlElement('wp:anchor')
     anchor.set(qn('wp:distT'), '0')
@@ -58,7 +56,6 @@ def create_floating_textbox(doc, text, left_inch, top_inch, width_inch, height_i
     anchor.set(qn('wp:layoutInCell'), '1')
     anchor.set(qn('wp:allowOverlap'), '1')
 
-    # Position absolutely relative to the page margin canvas
     simplePos = OxmlElement('wp:simplePos')
     simplePos.set(qn('x'), '0')
     simplePos.set(qn('y'), '0')
@@ -132,20 +129,20 @@ def create_floating_textbox(doc, text, left_inch, top_inch, width_inch, height_i
     prstGeom.append(avLst)
     spPr.append(prstGeom)
 
-    # Make the text box transparent with no borders
+    # Transparent background and borderless text boxes
     ln = OxmlElement('a:ln')
     noFillLn = OxmlElement('a:noFill')
     ln.append(noFillLn)
     spPr.append(ln)
     wsp.append(spPr)
 
-    # 3. Inject standard Word paragraphs containing text into the shape object
     txbx = OxmlElement('wps:txbx')
     txbxContent = OxmlElement('w:txbxContent')
     
     tb_p = OxmlElement('w:p')
     tb_pPr = OxmlElement('w:pPr')
-    # Minimize text box internal padding structures
+    
+    # Remove interior spaces
     spacing = OxmlElement('w:spacing')
     spacing.set(qn('w:after'), '0')
     spacing.set(qn('w:line'), '240')
@@ -222,25 +219,21 @@ class OCRApp:
 
     def process_image_layout(self, img, doc_out, custom_config):
         """Processes an image using image_to_data to capture layout coordinates."""
-        # Query Tesseract for raw block data instead of plain text strings
         data = pytesseract.image_to_data(img, lang='ben+eng', config=custom_config, output_type=pytesseract.Output.DICT)
         
         img_w, img_h = img.size
-        # Map pixels to default targets (Standard letter width 8.5 inches minus default margins)
         target_page_width_in = 6.5
         scale = target_page_width_in / img_w
         
         n_boxes = len(data['level'])
         has_content = False
         
-        # Group text fragments belonging to the exact same block layer line hierarchy
         current_block = -1
         current_line = -1
         line_text = []
         x_min, y_min, x_max, y_max = 0, 0, 0, 0
         
         for i in range(n_boxes):
-            # level 5 corresponds to structured phrase text segments
             if data['level'][i] == 5:
                 text = data['text'][i].strip()
                 if not text:
@@ -269,3 +262,21 @@ class OCRApp:
                     
                     line_text = [text]
                     x_min, y_min, x_max, y_max = x, y, x + w, y + h
+                    current_block = b_num
+                    current_line = l_num
+                    
+        if line_text:
+            full_str = " ".join(line_text)
+            create_floating_textbox(
+                doc_out, full_str,
+                x_min * scale, y_min * scale,
+                (x_max - x_min) * scale, (y_max - y_min) * scale
+            )
+            has_content = True
+            
+        return has_content
+
+    def threaded_ocr_process(self, file_path):
+        base_dir = os.path.dirname(file_path)
+        file_name = os.path.splitext(os.path.basename(file_path))[0]
+        output_doc_path = os.path.join(base_dir, f"{file_name}_extracted.docx")
