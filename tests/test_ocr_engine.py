@@ -241,6 +241,62 @@ class TestEnvironmentDetection(FakeTesseractCase):
         self.assertIn("fetch_tessdata.sh", report)
         self.assertIn("git lfs pull", report)
 
+    def test_languages_split_across_directories_are_merged(self) -> None:
+        """MacPorts data layout: ben in one dir, eng in another (or in the bundle)."""
+        ben_only = self.tmp / "macports-tessdata"
+        ben_only.mkdir()
+        write_traineddata(ben_only / "ben.traineddata")
+        eng_only = self.tmp / "other-tessdata"
+        eng_only.mkdir()
+        write_traineddata(eng_only / "eng.traineddata")
+
+        os.environ["BANGLA_OCR_TESSDATA"] = str(ben_only)
+        original = engine.SYSTEM_TESSDATA_DIRS
+        engine.SYSTEM_TESSDATA_DIRS = (str(eng_only),)
+        self.addCleanup(setattr, engine, "SYSTEM_TESSDATA_DIRS", original)
+
+        env = engine.detect_environment(include_gui_checks=False)
+        self.assertTrue(env.ok, engine.format_report(env))
+        self.assertEqual(env.tessdata_source, "combined")
+        self.assertIn("ben", env.languages)
+        self.assertIn("eng", env.languages)
+        self.assertEqual(env.lang_string.split("+")[:2], ["ben", "eng"])
+
+        merged = Path(env.tessdata_dir)
+        self.assertTrue((merged / "ben.traineddata").exists())
+        self.assertTrue((merged / "eng.traineddata").exists())
+        self.assertFalse(any(ch.isspace() for ch in str(merged)))
+        self.assertIn("Combined language data", engine.format_report(env))
+
+    def test_missing_english_is_reported_with_macports_fix(self) -> None:
+        ben_only = self.tmp / "ben-only"
+        ben_only.mkdir()
+        write_traineddata(ben_only / "ben.traineddata")
+        os.environ["BANGLA_OCR_TESSDATA"] = str(ben_only)
+        original = engine.SYSTEM_TESSDATA_DIRS
+        engine.SYSTEM_TESSDATA_DIRS = ()
+        self.addCleanup(setattr, engine, "SYSTEM_TESSDATA_DIRS", original)
+
+        env = engine.detect_environment(include_gui_checks=False)
+        report = engine.format_report(env)
+        self.assertTrue(env.ok)
+        self.assertEqual(env.lang_string, "ben")
+        self.assertIn("English language data", report)
+        self.assertIn("port install tesseract-eng", report)
+
+    def test_report_ends_with_numbered_next_steps(self) -> None:
+        env = engine.Environment(tesseract_cmd=None)
+        env.checks = [
+            engine.Check("Tesseract binary", "fail", "not found", "brew install tesseract"),
+            engine.Check("Language data (tessdata)", "fail", "missing", "run fetch script"),
+            engine.Check("Log directory", "ok", "fine"),
+        ]
+        report = engine.format_report(env)
+        self.assertIn("Next steps (in order):", report)
+        self.assertIn("  1. brew install tesseract", report)
+        self.assertIn("  2. run fetch script", report)
+        self.assertNotIn("  3.", report)
+
     def test_tessdata_with_spaces_is_made_shell_safe(self) -> None:
         spaced = self.tmp / "Application Support" / "Bangla OCR" / "tessdata"
         spaced.mkdir(parents=True)

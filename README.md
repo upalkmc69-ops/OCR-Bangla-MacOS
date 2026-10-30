@@ -26,15 +26,35 @@ happens". Each of these was reproduced and fixed:
 
 ---
 
-## 1. Install prerequisites
+## Quick start (one command)
+
+```bash
+git clone https://github.com/upalkmc69-ops/OCR-Bangla-MacOS.git
+cd OCR-Bangla-MacOS
+./scripts/setup_macos.sh
+```
+
+It verifies that your `python3` can open windows, creates `./venv`, installs the
+dependencies, checks Tesseract + Bangla/English language data, downloads the models if
+they are missing, and finishes with the diagnostics report. Re-run it any time.
+
+Then: `source venv/bin/activate && python3 src/ocr_bangla.py`
+
+---
+
+## 1. Install prerequisites (manual)
 
 ### Tesseract (required)
 
 ```bash
-brew install tesseract tesseract-lang      # Homebrew (Apple Silicon + Intel)
-# or
-sudo port install tesseract tesseract-ben  # MacPorts
+brew install tesseract tesseract-lang                  # Homebrew (Apple Silicon + Intel)
+# or — MacPorts installs every language as its own port:
+sudo port install tesseract tesseract-ben tesseract-eng
 ```
+
+> **MacPorts gotcha:** `sudo port install tesseract` alone ships **no language data**.
+> If you only install `tesseract-ben`, the app can read Bangla but will drop English
+> words. Always add `tesseract-eng` (and optionally `tesseract-osd`).
 
 Verify: `tesseract --version` and `tesseract --list-langs` (must include `ben`).
 
@@ -90,7 +110,18 @@ git lfs install && git lfs pull        # if Git LFS is installed
 ./scripts/fetch_tessdata.sh --system   # copy from the installed Tesseract
 ```
 
-A system-wide `brew install tesseract-lang` also works — the app falls back to it.
+A system-wide `brew install tesseract-lang` (or the MacPorts `tesseract-ben` /
+`tesseract-eng` ports) also works — the app falls back to it.
+
+**Languages may live in different folders.** Tesseract only accepts one data directory,
+so when `ben` comes from MacPorts and `eng` comes from the bundle (or vice versa), the app
+merges the available models into a small temporary folder and reports it as
+`(combined)` in diagnostics. That is normal and needs no action, but running
+`./scripts/fetch_tessdata.sh` keeps everything in one place.
+
+Language data is checked for three failure modes: a missing file, a truncated file, and a
+Git LFS pointer (a 132-byte text stub) — the last one is what a normal `git clone`
+produces here.
 
 ---
 
@@ -137,6 +168,8 @@ binary. Move the `.app` to `/Applications` freely — its language data travels 
 | `Error opening data file … ben.traineddata` | Language data missing/placeholder → run `./scripts/fetch_tessdata.sh` |
 | Works in Terminal, fails from Finder | Finder apps get `PATH=/usr/bin:/bin:/usr/sbin:/sbin`; the app searches Homebrew/MacPorts paths itself, or set `BANGLA_OCR_TESSERACT` |
 | OCR output is empty | Scan at 300 dpi+, avoid rotated pages; confirm `ben` in `tesseract --list-langs` |
+| Only Bangla recognised, English words dropped | English data missing. MacPorts: `sudo port install tesseract-eng`; Homebrew: `brew install tesseract-lang`; or `./scripts/fetch_tessdata.sh` |
+| "Missing: Pillow, pytesseract, …" | Dependencies are not installed for *that* Python: `python3 -m pip install -r requirements.txt` inside the virtualenv the app runs in |
 | "Operation not permitted" writing output | macOS privacy prompt — allow the app under System Settings ▸ Privacy & Security ▸ Files and Folders |
 
 Logs: `~/Library/Logs/Bangla OCR/ocr-bangla.log` (Tools ▸ Reveal Log File).
@@ -171,6 +204,7 @@ ocr-bangla/
 │   └── ocr_engine.py      # discovery, diagnostics, OCR pipeline (no tkinter)
 ├── tests/                 # unittest suite + fake tesseract + tkinter stub
 ├── scripts/
+│   ├── setup_macos.sh     # one-shot: venv + deps + tesseract + language data
 │   ├── build_app.sh       # verified PyInstaller .app build
 │   └── fetch_tessdata.sh  # download real ben/eng/osd models
 ├── tessdata/              # language models (Git LFS)

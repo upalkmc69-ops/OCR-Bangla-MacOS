@@ -109,7 +109,7 @@ class Environment:
     tesseract_version: str | None = None
     tesseract_error: str | None = None
     tessdata_dir: Path | None = None
-    tessdata_source: str = "none"  # bundled | environment | system | none
+    tessdata_source: str = "none"  # environment | bundled | system | combined | none
     languages: list[str] = field(default_factory=list)
     checks: list[Check] = field(default_factory=list)
     _config: str | None = field(default=None, repr=False)
@@ -226,10 +226,7 @@ def traineddata_status(path: Path) -> tuple[str, str]:
     if not head:
         return "empty", "file is empty"
     if head.startswith(_GIT_LFS_SIGNATURE):
-        return (
-            "lfs-pointer",
-            f"Git LFS pointer ({size} bytes) instead of the real {size and 'language'} data",
-        )
+        return "lfs-pointer", f"{size}-byte Git LFS pointer, not a real model"
     if size < _MIN_TRAINEDDATA_BYTES:
         return "too-small", f"only {size} bytes — truncated or placeholder file"
 
@@ -322,12 +319,94 @@ def system_tessdata_dirs() -> list[Path]:
     return [p for p in candidates if p.is_dir()]
 
 
-def _count_valid(directory: Path) -> int:
-    return sum(
-        1
+def _language_set(directory: Path) -> set[str]:
+    """Which required languages are actually usable in *directory*."""
+    return {
+        code
         for code in REQUIRED_LANGS
-        if traineddata_status(directory / f"{code}.traineddata")[0] == "ok"
-    )
+        if traineddata_status(Path(directory) / f"{code}.traineddata")[0] == "ok"
+    }
+
+
+def _count_valid(directory: Path) -> int:
+    return len(_language_set(directory))
+
+
+def tessdata_candidates(explicit: str | None = None) -> list[tuple[Path, str]]:
+    """Every tessdata directory worth looking at, best first, without duplicates.
+
+    Order matters: an explicit/``BANGLA_OCR_TESSDATA`` directory wins over the
+    copy that ships with the app, which wins over system installs.
+    """
+    groups: list[tuple[list[Path], str]] = []
+    override = explicit or os.environ.get(ENV_TESSDATA)
+    if override:
+        groups.append(([_expand(override)], "environment"))
+    groups.append((bundled_tessdata_dirs(), "bundled"))
+    groups.append((system_tessdata_dirs(), "system"))
+
+    candidates: list[tuple[Path, str]] = []
+    seen: set[Path] = set()
+    for directories, source in groups:
+        for directory in directories:
+            try:
+                resolved = directory.resolve()
+            except OSError:
+                continue
+            if resolved in seen or not resolved.is_dir():
+                continue
+            seen.add(resolved)
+            candidates.append((resolved, source))
+    return candidates
+
+
+def merge_tessdata(candidates: list[tuple[Path, str]]) -> tuple[Path | None, dict[str, Path]]:
+    """Combine languages that live in *different* tessdata directories.
+
+    MacPorts installs each language as its own port, so ``ben`` and ``eng`` can
+    easily end up in separate directories (or one bundled, one system-wide).
+    Tesseract only accepts a single ``--tessdata-dir``, so we build a small
+    symlink farm that contains the best copy of every language.
+    """
+    chosen: dict[str, Path] = {}
+    for directory, _source in candidates:
+        for code in REQUIRED_LANGS + OPTIONAL_LANGS:
+            if code in chosen:
+                continue
+            path = directory / f"{code}.traineddata"
+            if path.is_file() and traineddata_status(path)[0] == "ok":
+                chosen[code] = path
+    if not chosen:
+        return None, {}
+
+    import hashlib  # noqa: PLC0415 - only needed here
+
+    digest = hashlib.sha1(
+        "|".join(f"{code}={path}" for code, path in sorted(chosen.items())).encode("utf-8")
+    ).hexdigest()[:12]
+    target = Path(tempfile.gettempdir()) / f"bangla-ocr-tessdata-{digest}"
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        # Drop stale entries (a language that is no longer available anywhere).
+        for stale in target.glob("*.traineddata"):
+            if stale.name[: -len(".traineddata")] not in chosen:
+                stale.unlink(missing_ok=True)
+        for code, source in chosen.items():
+            link = target / f"{code}.traineddata"
+            try:
+                if link.is_symlink() or link.exists():
+                    if link.is_symlink() and link.resolve() == source.resolve():
+                        continue
+                    link.unlink()
+                link.symlink_to(source)
+            except OSError:
+                shutil.copy2(source, link)
+    except OSError as exc:  # pragma: no cover - exotic filesystem failure
+        LOG.warning("Could not build combined tessdata directory: %s", exc)
+        best = next(iter(chosen.values())).parent
+        return best, chosen
+    LOG.info("Combined tessdata in %s from %s", target, {c: str(p) for c, p in chosen.items()})
+    return target, chosen
 
 
 def find_tessdata(explicit: str | None = None) -> tuple[Path | None, str]:
@@ -336,33 +415,25 @@ def find_tessdata(explicit: str | None = None) -> tuple[Path | None, str]:
     Returns ``(path, source)``; ``source`` is ``bundled``, ``environment``,
     ``system`` or ``none``.
     """
-    override = explicit or os.environ.get(ENV_TESSDATA)
-    if override:
-        path = _expand(override)
-        if path.is_dir() and _count_valid(path) >= 1:
-            return path, "environment"
-        LOG.warning("Ignoring %s: no usable language data in %s", ENV_TESSDATA, path)
+    candidates = tessdata_candidates(explicit)
 
-    bundled = bundled_tessdata_dirs()
-    if override:
-        rejected = _expand(override).resolve()
-        bundled = [path for path in bundled if path.resolve() != rejected]
-    system = system_tessdata_dirs()
+    # 1. A single directory that already has every required language.
+    for directory, source in candidates:
+        if _count_valid(directory) == len(REQUIRED_LANGS):
+            return directory, source
 
-    # Prefer a directory that contains *both* required languages.
-    for group, source in ((bundled, "bundled"), (system, "system")):
-        for directory in group:
-            if _count_valid(directory) == len(REQUIRED_LANGS):
-                return directory, source
-    # Otherwise accept whatever has the most complete data.
-    best: tuple[int, Path, str] | None = None
-    for group, source in ((bundled, "bundled"), (system, "system")):
-        for directory in group:
-            score = _count_valid(directory)
-            if score and (best is None or score > best[0]):
-                best = (score, directory, source)
-    if best:
-        return best[1], best[2]
+    # 2. Split across directories (e.g. ben from MacPorts, eng from the bundle).
+    combined, _chosen = merge_tessdata(candidates)
+    if combined is not None and _count_valid(combined) == len(REQUIRED_LANGS):
+        return combined, "combined"
+
+    # 3. Partial data still beats nothing, but do not create a temp directory
+    #    that holds exactly what one real directory already holds.
+    if combined is not None and _count_valid(combined):
+        best = max(candidates, key=lambda item: _count_valid(item[0]), default=None)
+        if best is not None and _language_set(best[0]) == _language_set(combined):
+            return best
+        return combined, "combined"
     return None, "none"
 
 
@@ -548,14 +619,19 @@ def _check_dependencies() -> list[Check]:
             detail_bits.append(f"{distribution} {version}")
 
     if missing:
-        checks.append(
-            Check(
-                "Python dependencies",
-                "fail",
-                "Missing: " + ", ".join(missing),
-                f"Run: {Path(sys.executable).name} -m pip install -r requirements.txt "
-                "(from the project folder).",
+        python = sys.executable
+        in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+        if in_venv:
+            fix = f"Run:\n  {python} -m pip install -r requirements.txt"
+        else:
+            fix = (
+                "Run (from the project folder):\n"
+                "  python3 -m venv venv && source venv/bin/activate\n"
+                "  python -m pip install -r requirements.txt\n"
+                f"This Python has no virtualenv: {python}"
             )
+        checks.append(
+            Check("Python dependencies", "fail", "Missing: " + ", ".join(missing), fix)
         )
     else:
         checks.append(Check("Python dependencies", "ok", ", ".join(detail_bits)))
@@ -624,32 +700,45 @@ def _lfs_pointer_checks(directories: list[Path], in_use: Path | None) -> list[Ch
     checks: list[Check] = []
     seen: set[Path] = set()
     for directory in directories:
+        try:
+            resolved_dir = directory.resolve()
+        except OSError:
+            continue
+        if resolved_dir in seen or not resolved_dir.is_dir():
+            continue
+        seen.add(resolved_dir)
+
+        placeholders = []
         for code in REQUIRED_LANGS + OPTIONAL_LANGS:
-            path = directory / f"{code}.traineddata"
-            if path in seen or not path.exists():
-                continue
-            seen.add(path)
-            state, human = traineddata_status(path)
-            if state != "lfs-pointer":
-                continue
-            used = in_use is not None and path.parent.resolve() == Path(in_use).resolve()
-            checks.append(
-                Check(
-                    f"{path}",
-                    "warn",
-                    f"Git LFS pointer file, not real language data ({human}). "
-                    + (
-                        "This copy is in use, so OCR will fail with "
-                        '"Error opening data file".'
-                        if used
-                        else "Another tessdata directory is being used instead, but this "
-                        "copy is still broken."
-                    ),
-                    "Run `git lfs install && git lfs pull` in the repository, or "
-                    "`./scripts/fetch_tessdata.sh`, or install the language pack "
-                    "(`brew install tesseract-lang`).",
+            path = resolved_dir / f"{code}.traineddata"
+            if path.exists() and traineddata_status(path)[0] == "lfs-pointer":
+                placeholders.append(code)
+        if not placeholders:
+            continue
+
+        used = in_use is not None and resolved_dir == Path(in_use).resolve()
+        checks.append(
+            Check(
+                f"tessdata in {resolved_dir}",
+                "warn",
+                f"{', '.join(placeholders)} "
+                + (
+                    "is a Git LFS pointer file, not a real language model. "
+                    if len(placeholders) == 1
+                    else "are Git LFS pointer files, not real language models. "
                 )
+                + (
+                    "This directory is in use, so OCR would fail with "
+                    '"Error opening data file".'
+                    if used
+                    else "Another tessdata directory is used instead, but this copy stays broken."
+                ),
+                "Run `./scripts/fetch_tessdata.sh` (recommended), or "
+                "`git lfs install && git lfs pull`, or install language data with "
+                "`brew install tesseract-lang` / "
+                "`sudo port install tesseract-ben tesseract-eng`.",
             )
+        )
     return checks
 
 
@@ -691,15 +780,31 @@ def _check_tessdata(env: Environment) -> tuple[Check, list[Check]]:
                 "fail",
                 f"Bangla (ben) language data not found. Tesseract reports: "
                 f"{', '.join(langs) or 'no languages'}",
-                "Homebrew: `brew install tesseract-lang`. MacPorts: "
-                "`sudo port install tesseract-ben`. Or run `./scripts/fetch_tessdata.sh` "
-                "to download ben/eng/osd into the bundled tessdata folder.",
+                "Homebrew: `brew install tesseract-lang`. MacPorts installs each "
+                "language separately: `sudo port install tesseract-ben tesseract-eng`. "
+                "Or run `./scripts/fetch_tessdata.sh` to download "
+                "ben/eng/osd into the bundled tessdata folder.",
             ),
             extra,
         )
 
     env.tessdata_dir = directory
     details: list[str] = []
+
+    if source == "combined":
+        _combined, origins = merge_tessdata(tessdata_candidates())
+        if origins:
+            extra.append(
+                Check(
+                    "Combined language data",
+                    "ok",
+                    "Languages are spread over several directories, so they are "
+                    "merged into a temporary tessdata folder: "
+                    + ", ".join(f"{code} from {path.parent}" for code, path in sorted(origins.items())),
+                    "To simplify this, run `./scripts/fetch_tessdata.sh` so the app "
+                    "carries ben/eng/osd itself.",
+                )
+            )
 
     # LFS placeholders are the #1 cause of "Error opening data file" from a
     # fresh clone; they were reported above by _lfs_pointer_checks().
@@ -733,7 +838,9 @@ def _check_tessdata(env: Environment) -> tuple[Check, list[Check]]:
                 f"Bangla data missing or unusable in {directory} "
                 f"(reports: {', '.join(env.languages) or 'none'})",
                 "Run `./scripts/fetch_tessdata.sh` (downloads ben/eng/osd from the "
-                "official tesseract-ocr repository) or `brew install tesseract-lang`.",
+                "official tesseract-ocr repository), or install the language packs: "
+                "`brew install tesseract-lang` / "
+                "`sudo port install tesseract-ben tesseract-eng`.",
             ),
             extra,
         )
@@ -741,7 +848,17 @@ def _check_tessdata(env: Environment) -> tuple[Check, list[Check]]:
     status = "warn" if "eng" in missing else "ok"
     note = f" ({source}) — {directory}"
     if missing:
-        note += f"; English missing: {', '.join(missing)}"
+        note += f"; missing: {', '.join(missing)}"
+        extra.append(
+            Check(
+                "English language data",
+                "warn",
+                "Tesseract can only see Bangla right now, so English words inside "
+                "your documents would be dropped.",
+                "MacPorts: `sudo port install tesseract-eng` · Homebrew: "
+                "`brew install tesseract-lang` · or run `./scripts/fetch_tessdata.sh`.",
+            )
+        )
     return Check("Language data (tessdata)", status, "Languages: " + ", ".join(env.languages) + note), extra
 
 
@@ -836,7 +953,7 @@ def detect_environment(
     return env
 
 
-def format_report(env: Environment) -> str:
+def format_report(env: Environment, include_next_steps: bool = True) -> str:
     """Plain-text diagnostics report (used by ``--diagnose`` and the GUI)."""
     lines = [
         f"{APP_NAME} {APP_VERSION} — diagnostics",
@@ -848,7 +965,7 @@ def format_report(env: Environment) -> str:
     for check in env.checks:
         lines.append(f"[{check.icon}] {check.name}: {check.detail}")
         if check.fix:
-            lines.append(f"       fix: {check.fix}")
+            lines.append(f"       fix: {check.fix.replace(chr(10), chr(10) + '            ')}")
     failures = [c for c in env.checks if c.status == "fail"]
     warnings = [c for c in env.checks if c.status == "warn"]
     lines.append("")
@@ -858,6 +975,17 @@ def format_report(env: Environment) -> str:
         lines.append(f"RESULT: ready to run, with {len(warnings)} warning(s).")
     else:
         lines.append("RESULT: everything looks good — Bangla + English OCR should work.")
+
+    if include_next_steps:
+        fixes: list[str] = []
+        for check in env.checks:
+            if check.status in ("fail", "warn") and check.fix and check.fix not in fixes:
+                fixes.append(check.fix)
+        if fixes:
+            lines.append("")
+            lines.append("Next steps (in order):")
+            for position, fix in enumerate(fixes[:6], start=1):
+                lines.append(f"  {position}. {fix.replace(chr(10), chr(10) + '     ')}")
     return "\n".join(lines)
 
 
