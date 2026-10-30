@@ -1,11 +1,26 @@
-# Python Virtual Environment
+# Python virtual environments
 venv/
+.venv/
+.venv-*/
+env/
+
+# Python caches
 __pycache__/
 *.pyc
-# PyInstaller Build Outputs
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# PyInstaller build outputs
 build/
 dist/
 *.spec
 
-# macOS System Files
+# macOS system files
 .DS_Store
+Icon?
+
+# Local logs / scratch
+*.log

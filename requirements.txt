@@ -1,7 +1,14 @@
-# Core dependencies for Bangla PDF OCR
-pytesseract>=0.3.13
+# Runtime dependencies for the Bangla OCR app.
+#
+# tkinter/Tk is deliberately NOT listed here: it is not a pip package. It comes
+# with python.org Python, or with `brew install python-tk@<version>` for
+# Homebrew Python. See README ▸ "1. Install a Python that can open windows".
+#
+# Tesseract itself is a native binary, not a Python package:
+#   brew install tesseract tesseract-lang
+
+pytesseract>=0.3.13,<0.4
 Pillow>=10.4.0
 python-docx>=1.1.2
-PyMuPDF>=1.24.11
 lxml>=5.4.0
-packaging>=26.2
+PyMuPDF>=1.24.11

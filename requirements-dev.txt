@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Building the standalone .app bundle
+pyinstaller>=6.9
