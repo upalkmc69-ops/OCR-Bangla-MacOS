@@ -282,7 +282,53 @@ class TestEnvironmentDetection(FakeTesseractCase):
         self.assertTrue(env.ok)
         self.assertEqual(env.lang_string, "ben")
         self.assertIn("English language data", report)
-        self.assertIn("port install tesseract-eng", report)
+        self.assertIn("tesseract-eng", report)
+        self.assertIn("Add that model", report)
+
+    def _as_package_manager(self, macports: bool, homebrew: bool):
+        """Pretend this machine has only the given package manager(s)."""
+        self.addCleanup(setattr, engine, "macports_prefix", engine.macports_prefix)
+        self.addCleanup(setattr, engine, "homebrew_prefix", engine.homebrew_prefix)
+        engine.macports_prefix = (lambda: engine.Path("/opt/local")) if macports else (lambda: None)
+        engine.homebrew_prefix = (lambda: engine.Path("/opt/homebrew")) if homebrew else (lambda: None)
+
+    def test_hints_never_mention_brew_on_a_macports_only_mac(self) -> None:
+        self._as_package_manager(macports=True, homebrew=False)
+        language = engine.language_pack_fix()
+        self.assertNotIn("brew", language)
+        self.assertIn("sudo port install tesseract-ben tesseract-eng", language)
+        self.assertIn("selfupdate", language)  # outdated port trees are common
+        self.assertIn("fetch_tessdata.sh", language)  # works without any package manager
+
+        tesseract = engine.tesseract_install_fix()
+        self.assertNotIn("brew", tesseract)
+        self.assertIn("port install tesseract", tesseract)
+
+        tk = engine.tkinter_install_fix()
+        self.assertNotIn("brew", tk)
+        self.assertIn(f"py{sys.version_info.major}{sys.version_info.minor}-tkinter", tk)
+
+    def test_hints_never_mention_macports_on_a_homebrew_only_mac(self) -> None:
+        self._as_package_manager(macports=False, homebrew=True)
+        language = engine.language_pack_fix()
+        self.assertNotIn("port install", language)
+        self.assertIn("brew install tesseract-lang", language)
+        self.assertIn("fetch_tessdata.sh", language)
+
+    def test_macports_only_machine_gets_macports_fixes_in_the_report(self) -> None:
+        self._as_package_manager(macports=True, homebrew=False)
+        ben_only = self.tmp / "ben-only-report"
+        ben_only.mkdir()
+        write_traineddata(ben_only / "ben.traineddata")
+        os.environ["BANGLA_OCR_TESSDATA"] = str(ben_only)
+        original = engine.SYSTEM_TESSDATA_DIRS
+        engine.SYSTEM_TESSDATA_DIRS = ()
+        self.addCleanup(setattr, engine, "SYSTEM_TESSDATA_DIRS", original)
+
+        report = engine.format_report(engine.detect_environment(include_gui_checks=False))
+        self.assertNotIn("brew", report)
+        self.assertIn("sudo port install tesseract-ben tesseract-eng", report)
+        self.assertIn("fetch_tessdata.sh", report)
 
     def test_report_ends_with_numbered_next_steps(self) -> None:
         env = engine.Environment(tesseract_cmd=None)

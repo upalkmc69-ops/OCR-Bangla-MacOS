@@ -188,7 +188,9 @@ First launch notes:
   • macOS may ask to confirm an app from an unidentified developer:
     right-click the app ▸ Open, or allow it under
     System Settings ▸ Privacy & Security.
-  • The app still needs Tesseract installed (brew install tesseract tesseract-lang).
+  • The app still needs Tesseract installed:
+      MacPorts:  sudo port install tesseract tesseract-ben tesseract-eng
+      Homebrew:  brew install tesseract tesseract-lang
     Move the .app anywhere — including /Applications — without breaking the
     language data, which now travels inside the bundle.
 EOF

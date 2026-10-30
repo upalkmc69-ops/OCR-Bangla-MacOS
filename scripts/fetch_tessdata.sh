@@ -60,6 +60,17 @@ if [[ "$REPO" != "fast" && "$REPO" != "best" ]]; then
     exit 1
 fi
 
+pm_language_hint() {
+    if [[ -x /opt/local/bin/port || -x /opt/pkg/bin/port ]]; then
+        echo "  MacPorts:  sudo port selfupdate && sudo port install tesseract-ben tesseract-eng"
+    elif [[ -x /opt/homebrew/bin/brew || -x /usr/local/bin/brew ]]; then
+        echo "  Homebrew:  brew install tesseract-lang"
+    else
+        echo "  MacPorts:  sudo port install tesseract-ben tesseract-eng"
+        echo "     or:     brew install tesseract-lang"
+    fi
+}
+
 file_size() {
     # BSD stat (macOS) first, then GNU stat (Linux/CI)
     stat -f%z "$1" 2>/dev/null || stat -c%s "$1"
@@ -101,7 +112,8 @@ if [[ "$MODE" == "system" ]]; then
     done
     if [[ -z "$SOURCE_DIR" ]]; then
         echo "error: no installed Tesseract language data found." >&2
-        echo "       Install it with: brew install tesseract-lang" >&2
+        echo "       Install it first:" >&2
+        pm_language_hint >&2
         exit 1
     fi
     for lang in "${LANGS[@]}"; do
@@ -164,7 +176,8 @@ done
 if [[ $FAILED -ne 0 ]]; then
     echo "" >&2
     echo "Some languages could not be installed. Alternatives:" >&2
-    echo "  brew install tesseract-lang    # then: ./scripts/fetch_tessdata.sh --system" >&2
+    echo "Install the language data, then re-copy it with --system:" >&2
+    pm_language_hint >&2
     exit 1
 fi
 

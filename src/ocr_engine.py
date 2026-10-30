@@ -191,6 +191,120 @@ class Cancelled(OCRError):
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
+def homebrew_prefix() -> Path | None:
+    """Homebrew prefix, if Homebrew is installed on this Mac."""
+    for candidate in ("/opt/homebrew", "/usr/local"):
+        if Path(candidate, "bin", "brew").exists():
+            return Path(candidate)
+    return None
+
+
+def macports_prefix() -> Path | None:
+    """MacPorts prefix, if MacPorts is installed on this Mac."""
+    for candidate in ("/opt/local", "/opt/pkg"):
+        if Path(candidate, "bin", "port").exists():
+            return Path(candidate)
+    return None
+
+
+def python_flavour() -> str:
+    """Which Python distribution is running (worded for install hints)."""
+    executable = str(sys.executable)
+    if "/Library/Frameworks/Python.framework/" in executable:
+        return "python.org"
+    if "/opt/local/" in executable:
+        return "macports"
+    if "/opt/homebrew/" in executable or "/usr/local/Cellar/" in executable or "/usr/local/opt/" in executable:
+        return "homebrew"
+    if executable.startswith("/usr/bin/") or "CommandLineTools" in executable:
+        return "apple"
+    return "unknown"
+
+
+def tkinter_install_fix() -> str:
+    """Install hint for a missing/broken Tk, matching the Python in use."""
+    version = f"py{sys.version_info.major}{sys.version_info.minor}-tkinter"
+    tips: list[str] = []
+    if python_flavour() == "apple":
+        tips.append("Apple's /usr/bin/python3 ships Tk 8.5.9, which is broken on macOS 11+")
+    if python_flavour() == "python.org":
+        tips.append("This is python.org Python — reinstall it from python.org (Tk is bundled)")
+    if macports_prefix() is not None:
+        tips.append(f"MacPorts: `sudo port install {version}`")
+    if homebrew_prefix() is not None:
+        tips.append(
+            f"Homebrew: `brew install python-tk@{sys.version_info.major}.{sys.version_info.minor}`"
+        )
+    if not tips:
+        tips = [
+            "python.org Python 3.12+ (ships Tk 8.6)",
+            f"MacPorts: `sudo port install {version}`",
+            "Homebrew: `brew install python-tk@3.12`",
+        ]
+    elif python_flavour() not in ("apple", "python.org"):
+        tips.append("or use python.org Python 3.12+ (ships Tk 8.6)")
+    return " · ".join(tips)
+
+
+def specific_language_fix(code: str) -> str:
+    """Short, targeted hint for adding one language model (e.g. ``eng``)."""
+    parts: list[str] = []
+    if macports_prefix() is not None:
+        parts.append(f"MacPorts: `sudo port install tesseract-{code}`")
+    if homebrew_prefix() is not None:
+        parts.append("Homebrew: `brew install tesseract-lang`")
+    if not parts:
+        parts.append(
+            f"MacPorts: `sudo port install tesseract-{code}` / Homebrew: `brew install tesseract-lang`"
+        )
+    return "Add that model: " + " · ".join(parts) + " · or run `./scripts/fetch_tessdata.sh`"
+
+
+def language_pack_fix(include_pointer_tip: bool = True) -> str:
+    """Install hint tailored to the package managers actually present.
+
+    Users who only have MacPorts (or neither) should never be told to run brew;
+    users with neither are pointed at the bundled downloader, which needs no
+    package manager at all.
+    """
+    parts: list[str] = []
+    if macports_prefix() is not None:
+        parts.append("MacPorts: `sudo port selfupdate && sudo port install tesseract-ben tesseract-eng`")
+    if homebrew_prefix() is not None:
+        parts.append("Homebrew: `brew install tesseract-lang`")
+    if not parts:
+        parts.append(
+            "MacPorts: `sudo port install tesseract-ben tesseract-eng` / "
+            "Homebrew: `brew install tesseract-lang`"
+        )
+    fix = "No package manager needed: run `./scripts/fetch_tessdata.sh`. " + " · ".join(parts)
+    if include_pointer_tip:
+        fix += " · or `git lfs install && git lfs pull`"
+    return fix
+
+
+def tesseract_install_fix() -> str:
+    """Install hint for the Tesseract binary itself."""
+    if macports_prefix() is not None:
+        return (
+            "Install it with MacPorts: "
+            "`sudo port selfupdate && sudo port install tesseract tesseract-ben tesseract-eng`, "
+            "then relaunch the app. Set BANGLA_OCR_TESSERACT=/full/path/to/tesseract if it "
+            "lives somewhere else."
+        )
+    if homebrew_prefix() is not None:
+        return (
+            "Install it with Homebrew: `brew install tesseract tesseract-lang`, then "
+            "relaunch the app. Set BANGLA_OCR_TESSERACT=/full/path/to/tesseract if it "
+            "lives somewhere else."
+        )
+    return (
+        "Install it: `sudo port install tesseract tesseract-ben tesseract-eng` (MacPorts) or "
+        "`brew install tesseract tesseract-lang` (Homebrew), then relaunch the app. "
+        "Set BANGLA_OCR_TESSERACT=/full/path/to/tesseract for a non-standard install."
+    )
+
+
 def _expand(path: str | Path) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(str(path))))
 
@@ -533,8 +647,7 @@ def _check_system_python() -> Check | None:
         "warn",
         f"Using Apple's system Python ({resolved}). It bundles Tk 8.5.9, which is "
         "known to crash or open a blank window on macOS 11+ and cannot be fixed by pip.",
-        "Use python.org Python 3.12/3.13 or `brew install python python-tk@3.13`, "
-        "then recreate the virtualenv.",
+        tkinter_install_fix() + " — then recreate the virtualenv.",
     )
 
 
@@ -548,10 +661,9 @@ def _check_tkinter() -> tuple[Check, str | None]:
                 "fail",
                 "tkinter is not installed for this Python, so the app cannot open a "
                 "window and exits immediately.",
-                "Homebrew Python: `brew install python-tk@3.13` (match your Python "
-                "version). python.org Python already includes it — reinstall if "
-                "Tk support is missing. Never use /usr/bin/python3: its Tk 8.5.9 "
-                "is broken on recent macOS.",
+                tkinter_install_fix()
+                + ". python.org Python already includes Tk — reinstall it if Tk "
+                "support is missing. Never use /usr/bin/python3 on modern macOS.",
             ),
             None,
         )
@@ -584,8 +696,7 @@ def _check_tkinter() -> tuple[Check, str | None]:
                 "warn",
                 f"Tk {tk_version} detected. Tk 8.5 is deprecated on macOS and often "
                 "shows a blank window or crashes on launch.",
-                "Install Tk 8.6+: python.org Python 3.12+ or "
-                "`brew install python-tk@3.13`.",
+                "Install Tk 8.6+: " + tkinter_install_fix() + ".",
             ),
             tk_version,
         )
@@ -666,10 +777,7 @@ def _check_tesseract(explicit: str | None) -> tuple[Check, Environment]:
                 "fail",
                 "`tesseract` was not found on PATH or in the usual macOS locations "
                 f"({checked}). The app can launch but cannot read any text.",
-                "Install it: `brew install tesseract tesseract-lang` (Homebrew) or "
-                "`sudo port install tesseract tesseract-ben` (MacPorts). Then relaunch "
-                "the app. Set BANGLA_OCR_TESSERACT=/full/path/to/tesseract for a "
-                "non-standard install.",
+                tesseract_install_fix(),
             ),
             env,
         )
@@ -733,10 +841,7 @@ def _lfs_pointer_checks(directories: list[Path], in_use: Path | None) -> list[Ch
                     if used
                     else "Another tessdata directory is used instead, but this copy stays broken."
                 ),
-                "Run `./scripts/fetch_tessdata.sh` (recommended), or "
-                "`git lfs install && git lfs pull`, or install language data with "
-                "`brew install tesseract-lang` / "
-                "`sudo port install tesseract-ben tesseract-eng`.",
+                language_pack_fix(),
             )
         )
     return checks
@@ -780,10 +885,8 @@ def _check_tessdata(env: Environment) -> tuple[Check, list[Check]]:
                 "fail",
                 f"Bangla (ben) language data not found. Tesseract reports: "
                 f"{', '.join(langs) or 'no languages'}",
-                "Homebrew: `brew install tesseract-lang`. MacPorts installs each "
-                "language separately: `sudo port install tesseract-ben tesseract-eng`. "
-                "Or run `./scripts/fetch_tessdata.sh` to download "
-                "ben/eng/osd into the bundled tessdata folder.",
+                language_pack_fix(include_pointer_tip=False)
+                + " — this downloads ben/eng/osd into the bundled tessdata folder.",
             ),
             extra,
         )
@@ -837,10 +940,8 @@ def _check_tessdata(env: Environment) -> tuple[Check, list[Check]]:
                 "fail",
                 f"Bangla data missing or unusable in {directory} "
                 f"(reports: {', '.join(env.languages) or 'none'})",
-                "Run `./scripts/fetch_tessdata.sh` (downloads ben/eng/osd from the "
-                "official tesseract-ocr repository), or install the language packs: "
-                "`brew install tesseract-lang` / "
-                "`sudo port install tesseract-ben tesseract-eng`.",
+                language_pack_fix(include_pointer_tip=False)
+                + " — it downloads ben/eng/osd from the official tesseract-ocr repository.",
             ),
             extra,
         )
@@ -855,8 +956,7 @@ def _check_tessdata(env: Environment) -> tuple[Check, list[Check]]:
                 "warn",
                 "Tesseract can only see Bangla right now, so English words inside "
                 "your documents would be dropped.",
-                "MacPorts: `sudo port install tesseract-eng` · Homebrew: "
-                "`brew install tesseract-lang` · or run `./scripts/fetch_tessdata.sh`.",
+                specific_language_fix("eng"),
             )
         )
     return Check("Language data (tessdata)", status, "Languages: " + ", ".join(env.languages) + note), extra

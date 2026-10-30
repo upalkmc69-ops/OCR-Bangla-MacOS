@@ -10,6 +10,9 @@
 #   3. check Tesseract + Bangla/English language data and fix what it can,
 #   4. print the final diagnostics report and tell you how to launch.
 #
+# Works with MacPorts, Homebrew, or neither — the language models can be
+# downloaded straight into ./tessdata without any package manager.
+#
 # Safe to re-run: existing parts are reused.
 #
 set -euo pipefail
@@ -24,6 +27,46 @@ VPY="$VENV/bin/python"
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m    %s\033[0m\n' "$*"; }
 die() { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
+
+have_port() { [[ -x /opt/local/bin/port || -x /opt/pkg/bin/port ]]; }
+have_brew() { [[ -x /opt/homebrew/bin/brew || -x /usr/local/bin/brew ]]; }
+
+# Package-manager hints, shown only for managers that are actually installed.
+pm_tesseract_hint() {
+    if have_port; then
+        echo "      MacPorts:  sudo port selfupdate && sudo port install tesseract tesseract-ben tesseract-eng"
+    fi
+    if have_brew; then
+        echo "      Homebrew:  brew install tesseract tesseract-lang"
+    fi
+    if ! have_port && ! have_brew; then
+        echo "      MacPorts:  sudo port install tesseract tesseract-ben tesseract-eng"
+        echo "         or:     brew install tesseract tesseract-lang"
+    fi
+}
+
+pm_language_hint() {
+    if have_port; then
+        echo "      MacPorts:  sudo port selfupdate && sudo port install tesseract-ben tesseract-eng"
+    fi
+    if have_brew; then
+        echo "      Homebrew:  brew install tesseract-lang"
+    fi
+    if ! have_port && ! have_brew; then
+        echo "      MacPorts:  sudo port install tesseract-ben tesseract-eng"
+        echo "         or:     brew install tesseract-lang"
+    fi
+    echo "      or run:    ./scripts/fetch_tessdata.sh   (no package manager needed)"
+}
+
+pm_python_hint() {
+    if have_port; then
+        echo "      MacPorts:  sudo port install $PYTAG-tkinter"
+    fi
+    if have_brew; then
+        echo "      Homebrew:  brew install python-tk@$PYVER"
+    fi
+}
 
 usage() {
     cat <<'EOF'
@@ -61,18 +104,28 @@ if sys.version_info < (3, 9):
 print(f"    Python {sys.version.split()[0]} at {sys.executable}")
 PY
 
+PYVER="$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+PYTAG="$("$PYTHON" -c 'import sys; print(f"py{sys.version_info.major}{sys.version_info.minor}")')"
+
 if ! "$PYTHON" -c "import tkinter" >/dev/null 2>&1; then
-    cat >&2 <<'EOF'
+    cat >&2 <<EOF
 error: this Python cannot open windows — tkinter/Tk is missing or broken.
 
-  Homebrew Python:    brew install python python-tk@3.13
-  python.org Python:  https://www.python.org/downloads/macos/   (includes Tk 8.6)
+      python.org Python:  https://www.python.org/downloads/macos/   (includes Tk 8.6)
+$(pm_python_hint)
 
-  Avoid /usr/bin/python3: Apple's Tk 8.5.9 crashes on recent macOS.
+      Avoid /usr/bin/python3: Apple's Tk 8.5.9 crashes on recent macOS.
 EOF
     exit 1
 fi
 echo "    tkinter/Tk: OK"
+if have_port; then
+    echo "    package manager: MacPorts ($( [[ -x /opt/local/bin/port ]] && echo /opt/local || echo /opt/pkg ))"
+elif have_brew; then
+    echo "    package manager: Homebrew ($( [[ -x /opt/homebrew/bin/brew ]] && echo /opt/homebrew || echo /usr/local ))"
+else
+    echo "    package manager: none — language models will be downloaded into ./tessdata"
+fi
 
 # ---------------------------------------------------------------------------
 say "2/4  Python environment"
@@ -95,17 +148,16 @@ say "3/4  Tesseract and language data"
 if command -v tesseract >/dev/null 2>&1; then
     echo "    $("tesseract" --version 2>&1 | head -n 1) — $(command -v tesseract)"
 else
-    for candidate in /opt/homebrew/bin/tesseract /usr/local/bin/tesseract /opt/local/bin/tesseract; do
-        [[ -x "$candidate" ]] && break
+    found=""
+    for candidate in /opt/local/bin/tesseract /opt/homebrew/bin/tesseract /usr/local/bin/tesseract; do
+        [[ -x "$candidate" ]] && found="$candidate" && break
     done
-    if [[ -x "${candidate:-}" ]]; then
-        echo "    found $candidate (not on PATH, the app searches there anyway)"
+    if [[ -n "$found" ]]; then
+        echo "    found $found (not on PATH; the app searches there anyway)"
     else
-        cat >&2 <<'EOF'
+        cat >&2 <<EOF
     warning: Tesseract is not installed. The app will launch but cannot read text.
-
-      Homebrew:  brew install tesseract tesseract-lang
-      MacPorts:  sudo port install tesseract tesseract-ben tesseract-eng
+$(pm_tesseract_hint)
 EOF
     fi
 fi
@@ -118,7 +170,7 @@ sys.path.insert(0, str(Path("src").resolve()))
 import ocr_engine
 
 env = ocr_engine.detect_environment(include_gui_checks=False)
-missing = [c for c in ocr_engine.REQUIRED_LANGS if c not in env.languages]
+missing = [code for code in ocr_engine.REQUIRED_LANGS if code not in env.languages]
 print("missing:" + ",".join(missing) if missing else "ok")
 PY
 }
@@ -128,15 +180,12 @@ if [[ "$STATE" == "ok" ]]; then
     echo "    Bangla + English language data: OK"
 else
     warn "language data incomplete ($STATE) — downloading ben/eng/osd into ./tessdata"
-    if ./scripts/fetch_tessdata.sh; then
-        STATE="$(language_state || echo "unknown")"
-    fi
+    ./scripts/fetch_tessdata.sh || true
+    STATE="$(language_state || echo "unknown")"
     if [[ "$STATE" != "ok" ]]; then
-        cat >&2 <<'EOF'
-    warning: language data is still incomplete. Install it manually:
-
-      MacPorts:  sudo port install tesseract-ben tesseract-eng
-      Homebrew:  brew install tesseract-lang
+        cat >&2 <<EOF
+    warning: language data is still incomplete. Install it with either:
+$(pm_language_hint)
 EOF
     fi
 fi
